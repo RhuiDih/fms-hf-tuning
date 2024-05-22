@@ -61,6 +61,7 @@ from tuning.utils.error_logging import (
     USER_ERROR_EXIT_CODE,
     write_termination_log,
 )
+from tuning.utils.preprocessing_utils import get_data_trainer_kwargs
 
 
 def train(
@@ -194,14 +195,6 @@ def train(
             }
         )
 
-    # TODO: near term - how response template ids are parsed out needs to be cleaned.
-    # The [2:] here applies if response template has \n prefix, it is needed to strip \n,
-    # otherwise template is not found. We will create issue to clean this out after we discuss
-    # data formats and collators we will support.
-    response_template_ids = tokenizer.encode(
-        data_args.response_template, add_special_tokens=False
-    )[2:]
-
     max_seq_length = min(train_args.max_seq_length, tokenizer.model_max_length)
     logger.info("Max sequence length is %s", max_seq_length)
     if train_args.max_seq_length > tokenizer.model_max_length:
@@ -309,6 +302,20 @@ def train(
         logger.info(
             "Validation dataset length is %s", len(formatted_validation_dataset)
         )
+    # Get the trainer args focused on data, specifically those sensitive to
+    # packing, response template, and dataset text field. Currently this consists of
+    # - training dataset
+    # - validation dataset
+    # - data collator
+    trainer_data_args = get_data_trainer_kwargs(
+        training_data_path=data_args.training_data_path,
+        validation_data_path=data_args.validation_data_path,
+        packing=train_args.packing,
+        response_template=data_args.response_template,
+        max_sequence_length=max_seq_length,
+        tokenizer=tokenizer,
+        dataset_text_field=data_args.dataset_text_field,
+    )
 
     if framework is not None and framework.requires_agumentation:
         model, (peft_config,) = framework.augmentation(
@@ -318,15 +325,13 @@ def train(
     trainer = SFTTrainer(
         model=model,
         tokenizer=tokenizer,
-        train_dataset=formatted_train_dataset,
-        eval_dataset=formatted_validation_dataset,
-        packing=packing,
-        data_collator=data_collator,
+        packing=train_args.packing,
         dataset_text_field=data_args.dataset_text_field,
         args=train_args,
         max_seq_length=max_seq_length,
         callbacks=trainer_callbacks,
         peft_config=peft_config,
+        **trainer_data_args
     )
 
     # We track additional metrics and experiment metadata after trainer object creation
