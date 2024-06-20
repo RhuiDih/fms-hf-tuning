@@ -31,6 +31,7 @@ from transformers import (
     LlamaTokenizer,
     LlamaTokenizerFast,
     TrainerCallback,
+    DataCollatorForSeq2Seq
 )
 from transformers.utils import is_accelerate_available, logging
 from trl import DataCollatorForCompletionOnlyLM, SFTTrainer
@@ -61,8 +62,7 @@ from tuning.utils.error_logging import (
     USER_ERROR_EXIT_CODE,
     write_termination_log,
 )
-from tuning.utils.preprocessing_utils import get_data_trainer_kwargs
-
+from tuning.utils.tokenizer_utils import setup_tokenizer
 
 def train(
     model_args: configs.ModelArguments,
@@ -169,9 +169,7 @@ def train(
     )
 
     # TODO: Move these to a config as well
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_args.model_name_or_path, cache_dir=train_args.cache_dir, use_fast=True
-    )
+    tokenizer = setup_tokenizer(model_args.model_name_or_path)
 
     # Calculate and save additional metrics to track later.
     additional_metrics["model_load_time"] = time.time() - model_load_time
@@ -229,94 +227,22 @@ def train(
         model=model,
     )
 
-    # Configure the collator and validate args related to packing prior to formatting the dataset
-    if train_args.packing:
-        logger.info("Packing is set to True")
-        data_collator = None
-        packing = True
-    else:
-        logger.info("Packing is set to False")
-        if data_args.response_template is None:
-            # TODO: Fix this, currently unreachable due to crashing in batch encoding tokenization
-            # We should do this validation up front, then do the encoding, then handle the collator
-            raise ValueError("Response template is None, needs to be set for training")
-        data_collator = DataCollatorForCompletionOnlyLM(
-            response_template_ids,
-            tokenizer=tokenizer,
-            ignore_index=configs.IGNORE_INDEX,
-        )
-        packing = False
-
-    # Currently we support formatted datasets with single sequence instances.
-    if not (data_args.dataset_text_field or data_args.data_formatter_template):
-        raise ValueError(
-            "dataset_text_field and data_formatter_template are None. \
-                            One of them needs to be set for training"
-        )
-    # Only one of dataset_text_field or data_formatter_template should be set.
-    if data_args.dataset_text_field and data_args.data_formatter_template:
-        raise ValueError(
-            "dataset_text_field and data_formatter_template are both set,\
-                but are mutually exclusive options"
-        )
-
-    # load the data by parsing JSON
-    data_files = {"train": data_args.training_data_path}
-    if data_args.validation_data_path:
-        data_files["validation"] = data_args.validation_data_path
-
-    format_dataset = lambda example: {  # pylint: disable=unnecessary-lambda-assignment
-        f"{data_args.dataset_text_field}": example[f"{data_args.dataset_text_field}"]
-        + tokenizer.eos_token
-    }
-
-    json_dataset = datasets.load_dataset("json", data_files=data_files)
-    if data_args.data_formatter_template:
-        (
-            formatted_train_dataset,
-            data_args.dataset_text_field,
-        ) = apply_custom_formatting_template(
-            json_dataset["train"],
-            data_args.data_formatter_template,
-            tokenizer.eos_token,
-        )
-    else:
-        formatted_train_dataset = json_dataset["train"].map(format_dataset)
-    logger.info("Training dataset length is %s", len(formatted_train_dataset))
-
-    formatted_validation_dataset = None
-    if data_args.validation_data_path:
-        if data_args.data_formatter_template:
-            (
-                formatted_validation_dataset,
-                data_args.dataset_text_field,
-            ) = apply_custom_formatting_template(
-                json_dataset["validation"],
-                data_args.data_formatter_template,
-                tokenizer.eos_token,
-            )
-        else:
-            formatted_validation_dataset = json_dataset["validation"].map(
-                format_dataset
-            )
-        logger.info(
-            "Validation dataset length is %s", len(formatted_validation_dataset)
-        )
-    # Get the trainer args focused on data, specifically those sensitive to
-    # packing, response template, and dataset text field. Currently this consists of
-    # - training dataset
-    # - validation dataset
-    # - data collator
-    trainer_data_args = get_data_trainer_kwargs(
-        training_data_path=data_args.training_data_path,
-        validation_data_path=data_args.validation_data_path,
-        packing=train_args.packing,
-        response_template=data_args.response_template,
-        max_sequence_length=max_seq_length,
-        tokenizer=tokenizer,
-        dataset_text_field=data_args.dataset_text_field,
+    trainer_data_kwargs = dict(
+        train_dataset = datasets.load_dataset("json", data_files=data_args.training_data_path)['train'],
+        data_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, padding=True, max_length=max_seq_length
+        ),
+        formatting_func = lambda x:x,
+        dataset_kwargs = {"skip_prepare_dataset": True},
     )
 
+    if data_args.validation_data_path:
+        trainer_data_kwargs.update(dict(
+            eval_dataset = datasets.load_dataset(
+                "json", data_files=data_args.validation_data_path)['train']
+            )
+        )
+    
     if framework is not None and framework.requires_agumentation:
         model, (peft_config,) = framework.augmentation(
             model, train_args, modifiable_args=(peft_config,)
@@ -331,7 +257,7 @@ def train(
         max_seq_length=max_seq_length,
         callbacks=trainer_callbacks,
         peft_config=peft_config,
-        **trainer_data_args
+        **trainer_data_kwargs
     )
 
     # We track additional metrics and experiment metadata after trainer object creation
