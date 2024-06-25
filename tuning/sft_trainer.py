@@ -320,7 +320,7 @@ def train(
         num_gpus=torch.distributed.get_world_size(),
         avg_sample_len=formatted_train_dataset.get_lengths().mean(),
         effective_batch_size=effective_batch_size,
-        max_batch_len_per_gpu=60000,
+        max_batch_len_per_gpu=51200,
         is_padding=False,
         dataset=formatted_train_dataset,
         pad_id=tokenizer.pad_token_id,
@@ -391,7 +391,7 @@ def train(
         buffer_dtype=torch.bfloat16,
     )
     # use FSDP checkpointing
-    trainer.accelerator.state.fsdp_plugin.activation_checkpointing = True
+    #trainer.accelerator.state.fsdp_plugin.activation_checkpointing = True
     trainer.accelerator.native_amp = False # defer to FSDP AMP
     
     def get_train_dataloader(self):
@@ -401,7 +401,7 @@ def train(
             d.pop("num_loss_counted_tokens")
             return d
 
-        max_batch_len=60000
+        max_batch_len=51200
         def pad_collate_fn(self, batch):
             lens = np.array([len(item["input_ids"]) for item in batch])
 
