@@ -18,6 +18,7 @@ import json
 import sys
 import time
 import traceback
+from dataclasses import dataclass
 
 # Third Party
 from huggingface_hub.utils._validators import HFValidationError
@@ -32,6 +33,8 @@ from transformers import (
     LlamaTokenizerFast,
     TrainerCallback,
     DataCollatorForSeq2Seq,
+    DefaultDataCollator,
+    default_data_collator
 )
 from transformers.utils import is_accelerate_available, logging
 from trl import DataCollatorForCompletionOnlyLM, SFTTrainer
@@ -62,7 +65,6 @@ from tuning.utils.error_logging import (
     USER_ERROR_EXIT_CODE,
     write_termination_log,
 )
-
 
 def train(
     model_args: configs.ModelArguments,
@@ -161,14 +163,14 @@ def train(
     if framework is not None and framework.requires_custom_loading:
         model_loader = framework.model_loader  # drop-in new loader
     model_load_time = time.time()
-    from instructlab.dolomite.hf_models import GPTDolomiteForCausalLM
-    from instructlab.training.utils import apply_gradient_checkpointing
-    model = GPTDolomiteForCausalLM.from_pretrained(
+    #from instructlab.dolomite.hf_models import GPTDolomiteForCausalLM
+    #from instructlab.training.utils import apply_gradient_checkpointing
+    model = model_loader(
         model_args.model_name_or_path,
         cache_dir=train_args.cache_dir,
         torch_dtype=get_torch_dtype(model_args.torch_dtype),
         attn_implementation="flash_attention_2" if model_args.use_flash_attn else None,
-        use_padding_free_transformer=True,
+        #use_padding_free_transformer=True,
     )
     # block_name = model._no_split_modules[0]
     # apply_gradient_checkpointing(
@@ -391,7 +393,7 @@ def train(
     # use FSDP checkpointing
     trainer.accelerator.state.fsdp_plugin.activation_checkpointing = True
     trainer.accelerator.native_amp = False # defer to FSDP AMP
-
+    
     def get_train_dataloader(self):
         _old = train_loader.collate_fn
         def collate_fn(self, *args, **kwargs):
@@ -408,14 +410,22 @@ def train(
             total_len = cumsum_lens[valid_up_to - 1]
 
             batch = batch[:valid_up_to]
-            input_ids = [x["input_ids"].tolist() for x in batch]
-            labels = [x["labels"].tolist() for x in batch]
+            
+            position_ids = []
+            for idx in range(len(batch)):
+                position_ids += list(range(len(batch[idx]['input_ids'])))
+                batch[idx]['labels'][0] = -100
+            position_ids = torch.tensor(position_ids, dtype=torch.long).unsqueeze(0)
+            input_ids = torch.cat([x['input_ids'] for x in batch]).unsqueeze(0)
+            labels = torch.cat([x['labels'] for x in batch]).unsqueeze(0)
+            
             num_loss_counted_tokens = sum(
                 [(x["labels"] != -100).sum().item() for x in batch]
             )
 
             return {
                 "input_ids": input_ids,
+                "position_ids": position_ids,
                 "labels": labels,
             }
 
