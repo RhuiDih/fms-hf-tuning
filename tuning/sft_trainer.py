@@ -32,11 +32,13 @@ from transformers import (
     LlamaTokenizer,
     LlamaTokenizerFast,
     TrainerCallback,
+    DataCollatorForSeq2Seq,
 )
 from transformers.utils import is_accelerate_available, logging
 from trl import SFTConfig, SFTTrainer
 import fire
 import transformers
+import datasets
 
 # Local
 from tuning.config import configs, peft_config
@@ -82,6 +84,9 @@ def train(
     exp_metadata: Optional[Dict] = None,
     quantized_lora_config: Optional[QuantizedLoraConfig] = None,
     fusedops_kernels_config: Optional[FusedOpsAndKernelsConfig] = None,
+    packing_mode:str = None,
+    use_hf_trainer:bool = False,
+    num_samples:int = 0,
 ):
     """Call the SFTTrainer
 
@@ -268,30 +273,55 @@ def train(
         multiple_of=model_args.embedding_size_multiple_of,
     )
 
-    # Configure the collator and validate args related to packing prior to formatting the dataset
-    if train_args.packing:
-        logger.info("Packing is set to True")
-        data_collator = None
-        packing = True
-    else:
-        logger.info("Packing is set to False")
-        packing = False
-
-    # Validate if data args are set properly
-    validate_data_args(data_args, packing)
-
-    (
-        formatted_train_dataset,
-        formatted_validation_dataset,
-        dataset_text_field,
-    ) = format_dataset(data_args, tokenizer, max_seq_length)
-    data_collator = get_data_collator(
-        packing,
-        data_args.response_template,
-        tokenizer,
-        formatted_train_dataset,
-        max_seq_length,
+    trainer_data_kwargs = dict(
+        formatting_func = lambda x:x,
+        dataset_kwargs = {"skip_prepare_dataset": True},
     )
+    if data_args.training_data_path.endswith("json") or data_args.training_data_path.endswith("jsonl"):
+        dataset = datasets.load_dataset("json", data_files=data_args.training_data_path)
+    else:
+        dataset = datasets.load_from_disk(data_args.training_data_path)
+    train_dataset = dataset["train"]
+
+    if data_args.validation_data_path:
+        eval_dataset = datasets.load_dataset(
+            "json", data_files=data_args.validation_data_path
+        )['train']
+    elif "validation" in dataset:
+        eval_dataset = dataset["validation"]
+    else:
+        _ds = train_dataset.train_test_split(test_size=0.1, seed=train_args.seed)
+        train_dataset = _ds["train"]
+        eval_dataset = _ds["test"]
+
+    if num_samples:
+        train_dataset = train_dataset.select(range(min(len(train_dataset), num_samples)))
+        eval_dataset = eval_dataset.select(range(min(len(eval_dataset), num_samples)))
+
+    def truncate(examples):
+        return {
+            "input_ids":[x[:max_seq_length] for x in examples["input_ids"]],
+            "labels":[x[:max_seq_length] for x in examples["labels"]],
+        }
+
+    train_dataset = train_dataset.map(truncate, batched=True)
+    eval_dataset = eval_dataset.map(truncate, batched=True)
+
+    if packing_mode == "minibatch":
+        from transformers import DataCollatorWithFlattening
+        data_collator = DataCollatorWithFlattening()
+    else:
+        data_collator = DataCollatorForSeq2Seq(
+            tokenizer=tokenizer, padding=True, max_length=max_seq_length
+        )
+
+    if data_args.validation_data_path:
+        trainer_data_kwargs.update(dict(
+            eval_dataset = datasets.load_dataset(
+                "json", data_files=data_args.validation_data_path)['train']
+            )
+        )
+    ### JSON file formatting ends here
 
     if framework is not None and framework.requires_agumentation:
         model, (peft_config,) = framework.augmentation(
@@ -313,21 +343,48 @@ def train(
         for k, v in train_args.to_dict().items()
         if k in transformer_train_arg_fields
     }
-    training_args = SFTConfig(**transformer_kwargs)
 
-    trainer = SFTTrainer(
-        model=model,
-        tokenizer=tokenizer,
-        train_dataset=formatted_train_dataset,
-        eval_dataset=formatted_validation_dataset,
-        packing=packing,
-        data_collator=data_collator,
-        dataset_text_field=dataset_text_field,
-        args=training_args,
-        max_seq_length=max_seq_length,
-        callbacks=trainer_callbacks,
-        peft_config=peft_config,
-    )
+    if transformer_kwargs["lr_scheduler_type"] == "steplr":
+        transformer_kwargs["lr_scheduler_kwargs"] = {
+            "gamma": 0.33,
+            "step_size": len(train_dataset) // transformer_kwargs["per_device_train_batch_size"]
+        }
+    if not use_hf_trainer:
+        training_args = SFTConfig(**transformer_kwargs)
+        trainer = SFTTrainer(
+            model=model,
+            tokenizer=tokenizer,
+            dataset_text_field=data_args.dataset_text_field,
+            args=training_args,
+            packing=False,
+            max_seq_length=max_seq_length,
+            callbacks=trainer_callbacks,
+            peft_config=peft_config,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            data_collator=data_collator,
+            **trainer_data_kwargs
+        )
+    else:
+        from transformers import TrainingArguments, Trainer
+        dummy = TrainingArguments("")
+        to_remove = []
+        for k in transformer_kwargs:
+            if not hasattr(dummy, k):
+                logger.info(f"Removing `{k}` from `transformer_kwargs`")
+                to_remove.append(k)
+        for k in to_remove:
+            transformer_kwargs.pop(k)
+        training_args = TrainingArguments(**transformer_kwargs)
+        trainer = Trainer(
+            model=model,
+            args=training_args,
+            tokenizer=tokenizer,
+            train_dataset=train_dataset,
+            eval_dataset=eval_dataset,
+            data_collator=data_collator
+        )
+
 
     # We track additional metrics and experiment metadata after trainer object creation
     # this ensure that the process is not repeated multiple times for FSDP runs.
@@ -388,6 +445,25 @@ def get_parser():
         help='Pass a json string representing K:V pairs to be associated\
               to the tuning run in the tracker. e.g. \'{"gpu":"A100-80G"}\'',
     )
+    parser.add_argument(
+        "--packing_mode",
+        type=str,
+        default=None,
+        choices=["minibatch"],
+    )
+
+    parser.add_argument(
+        "--use_hf_trainer",
+        default=False,
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--num_samples",
+        type=int,
+        default=0,
+    )
+
     return parser
 
 
@@ -455,6 +531,9 @@ def parse_arguments(parser, json_config=None):
 
         peft_method = additional.peft_method
         exp_metadata = additional.exp_metadata
+        packing_mode = additional.packing_mode
+        use_hf_trainer = additional.use_hf_trainer
+        num_samples = additional.num_samples
 
     if peft_method == "lora":
         tune_config = lora_config
@@ -474,6 +553,9 @@ def parse_arguments(parser, json_config=None):
         quantized_lora_config,
         fusedops_kernels_config,
         exp_metadata,
+        packing_mode,
+        use_hf_trainer,
+        num_samples
     )
 
 
@@ -496,13 +578,16 @@ def main(**kwargs):  # pylint: disable=unused-argument
             quantized_lora_config,
             fusedops_kernels_config,
             exp_metadata,
+            packing_mode,
+            use_hf_trainer,
+            num_samples
         ) = parse_arguments(parser, job_config)
         logger.debug(
             "Input args parsed: \
             model_args %s, data_args %s, training_args %s, trainer_controller_args %s, \
             tune_config %s, file_logger_config, %s aim_config %s, \
             quantized_lora_config %s, fusedops_kernels_config %s, \
-            exp_metadata %s",
+            exp_metadata %s, packing_mode %s",
             model_args,
             data_args,
             training_args,
@@ -513,6 +598,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             quantized_lora_config,
             fusedops_kernels_config,
             exp_metadata,
+            packing_mode,
+            use_hf_trainer
         )
     except Exception as e:  # pylint: disable=broad-except
         logger.error(traceback.format_exc())
@@ -553,6 +640,9 @@ def main(**kwargs):  # pylint: disable=unused-argument
             exp_metadata=metadata,
             quantized_lora_config=quantized_lora_config,
             fusedops_kernels_config=fusedops_kernels_config,
+            packing_mode=packing_mode,
+            use_hf_trainer=use_hf_trainer,
+            num_samples=num_samples,
         )
     except (MemoryError, OutOfMemoryError) as e:
         logger.error(traceback.format_exc())
