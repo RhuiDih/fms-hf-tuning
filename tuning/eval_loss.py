@@ -21,7 +21,6 @@ import time
 import traceback
 
 # Third Party
-import torch
 from huggingface_hub.utils._validators import HFValidationError
 from peft.utils.other import fsdp_auto_wrap_policy
 from torch.cuda import OutOfMemoryError
@@ -37,9 +36,9 @@ from transformers import (
 )
 from transformers.utils import is_accelerate_available, logging
 from trl import SFTConfig, SFTTrainer
+import datasets
 import fire
 import transformers
-import datasets
 
 # Local
 from tuning.config import configs, peft_config
@@ -58,16 +57,13 @@ from tuning.trackers.tracker_factory import FILE_LOGGING_TRACKER, get_tracker
 from tuning.trainercontroller import TrainerControllerCallback
 from tuning.utils.config_utils import get_hf_peft_config, get_json_config
 from tuning.utils.data_type_utils import get_torch_dtype
+from tuning.utils.data_utils import apply_custom_formatting_template
 from tuning.utils.error_logging import (
     INTERNAL_ERROR_EXIT_CODE,
     USER_ERROR_EXIT_CODE,
     write_termination_log,
 )
-from tuning.utils.preprocessing_utils import (
-    format_dataset,
-    get_data_collator,
-    validate_data_args,
-)
+from tuning.utils.preprocessing_utils import get_data_collator, validate_data_args
 
 
 def train(
@@ -88,10 +84,7 @@ def train(
     packing_mode:str = None,
     use_hf_trainer:bool = False,
     num_samples:int = 0,
-    goldfish_prob:float = 0.,
-    attention_dropout:float = 0.,
-    dont_freeze:list = [],
-    trust_remote_code:bool = False,
+    use_steplr:bool = False
 ):
     """Call the SFTTrainer
 
@@ -196,8 +189,6 @@ def train(
         cache_dir=train_args.cache_dir,
         torch_dtype=get_torch_dtype(model_args.torch_dtype),
         attn_implementation="flash_attention_2" if model_args.use_flash_attn else None,
-        attention_dropout=attention_dropout,
-        trust_remote_code=trust_remote_code
     )
 
     # TODO: Move these to a config as well
@@ -316,7 +307,7 @@ def train(
 
     if packing_mode == "minibatch":
         from transformers import DataCollatorWithFlattening
-        data_collator = DataCollatorWithFlattening(goldfish_prob=goldfish_prob)
+        data_collator = DataCollatorWithFlattening()
     else:
         data_collator = DataCollatorForSeq2Seq(
             tokenizer=tokenizer, padding=True, max_length=max_seq_length
@@ -350,62 +341,24 @@ def train(
         for k, v in train_args.to_dict().items()
         if k in transformer_train_arg_fields
     }
-    transformer_kwargs["gradient_checkpointing_kwargs"] = {
-        "use_reentrant": False
-    }
-    if transformer_kwargs["lr_scheduler_type"] == "steplr":
-        transformer_kwargs["lr_scheduler_kwargs"] = {
-            "gamma": 0.33,
-            "step_size": len(train_dataset) // transformer_kwargs["gradient_accumulation_steps"] // transformer_kwargs["per_device_train_batch_size"] // torch.distributed.get_world_size()
-        }
 
-    if dont_freeze:
-        for name, param in model.named_parameters():
-            if not any([x in name for x in dont_freeze]):
-                param.requires_grad = False
-            else:
-                logger.info("Training {}!".format(name))
-                param.requires_grad = True
-        logger.info("Frozen model number of parameters: {}".format(
-            sum(p.numel() for p in model.parameters() if p.requires_grad)))
-        #model.enable_input_require_grads()
-        
-    if not use_hf_trainer:
-        training_args = SFTConfig(**transformer_kwargs)
-        trainer = SFTTrainer(
-            model=model,
-            tokenizer=tokenizer,
-            dataset_text_field=data_args.dataset_text_field,
-            args=training_args,
-            packing=False,
-            max_seq_length=max_seq_length,
-            callbacks=trainer_callbacks,
-            peft_config=peft_config,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            data_collator=data_collator,
-            **trainer_data_kwargs
-        )
-    else:
-        from transformers import TrainingArguments, Trainer
-        dummy = TrainingArguments("")
-        to_remove = []
-        for k in transformer_kwargs:
-            if not hasattr(dummy, k):
-                logger.info(f"Removing `{k}` from `transformer_kwargs`")
-                to_remove.append(k)
-        for k in to_remove:
-            transformer_kwargs.pop(k)
-        training_args = TrainingArguments(**transformer_kwargs)
-        trainer = Trainer(
-            model=model,
-            args=training_args,
-            tokenizer=tokenizer,
-            train_dataset=train_dataset,
-            eval_dataset=eval_dataset,
-            data_collator=data_collator
-        )
-
+    training_args = SFTConfig(**transformer_kwargs)
+    training_args.per_device_eval_batch_size = 1
+    training_args.label_smoothing_factor = 0.
+    trainer = SFTTrainer(
+        model=model,
+        tokenizer=tokenizer,
+        dataset_text_field=data_args.dataset_text_field,
+        args=training_args,
+        packing=False,
+        max_seq_length=max_seq_length,
+        callbacks=trainer_callbacks,
+        peft_config=peft_config,
+        train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
+        data_collator=data_collator,
+        **trainer_data_kwargs
+    )
 
     # We track additional metrics and experiment metadata after trainer object creation
     # this ensure that the process is not repeated multiple times for FSDP runs.
@@ -434,7 +387,12 @@ def train(
         for x in framework.get_callbacks_and_ready_for_train(model, accelerator):
             trainer.add_callback(x)
 
-    trainer.train()
+    trainer._move_model_to_device(trainer.model, trainer.args.device)
+    eval_result = trainer.evaluate(eval_dataset)
+    print(eval_result)
+    import os
+    with open(os.path.join(training_args.output_dir, "val_loss.json"), "w") as f:
+        json.dump(eval_result, f)
 
 
 def get_parser():
@@ -474,25 +432,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--goldfish_prob",
-        type=float,
-        default=0.,
-    )
-
-    parser.add_argument(
-        "--attention_dropout",
-        type=float,
-        default=0.,
-    )
-
-    parser.add_argument(
         "--use_hf_trainer",
-        default=False,
-        action="store_true",
-    )
-
-    parser.add_argument(
-        "--trust_remote_code",
         default=False,
         action="store_true",
     )
@@ -504,9 +444,9 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--dont_freeze",
-        nargs="+",
-        default=[]
+        "--use_steplr",
+        default=False,
+        action="store_true",
     )
 
     return parser
@@ -579,10 +519,7 @@ def parse_arguments(parser, json_config=None):
         packing_mode = additional.packing_mode
         use_hf_trainer = additional.use_hf_trainer
         num_samples = additional.num_samples
-        goldfish_prob = additional.goldfish_prob
-        attention_dropout = additional.attention_dropout
-        dont_freeze = additional.dont_freeze
-        trust_remote_code = additional.trust_remote_code
+        use_steplr = additional.use_steplr
 
     if peft_method == "lora":
         tune_config = lora_config
@@ -605,10 +542,7 @@ def parse_arguments(parser, json_config=None):
         packing_mode,
         use_hf_trainer,
         num_samples,
-        goldfish_prob,
-        attention_dropout,
-        dont_freeze,
-        trust_remote_code
+        use_steplr
     )
 
 
@@ -634,10 +568,7 @@ def main(**kwargs):  # pylint: disable=unused-argument
             packing_mode,
             use_hf_trainer,
             num_samples,
-            goldfish_prob,
-            attention_dropout,
-            dont_freeze,
-            trust_remote_code
+            use_steplr
         ) = parse_arguments(parser, job_config)
         logger.debug(
             "Input args parsed: \
@@ -657,11 +588,11 @@ def main(**kwargs):  # pylint: disable=unused-argument
             exp_metadata,
             packing_mode,
             use_hf_trainer,
-            dont_freeze,
-            trust_remote_code
+            num_samples,
+            use_steplr
         )
     except Exception as e:  # pylint: disable=broad-except
-        logger.error(traceback.format_exc())
+        logging.error(traceback.format_exc())
         write_termination_log(
             f"Exception raised during training. This may be a problem with your input: {e}"
         )
@@ -702,10 +633,7 @@ def main(**kwargs):  # pylint: disable=unused-argument
             packing_mode=packing_mode,
             use_hf_trainer=use_hf_trainer,
             num_samples=num_samples,
-            goldfish_prob=goldfish_prob,
-            attention_dropout=attention_dropout,
-            dont_freeze=dont_freeze,
-            trust_remote_code=trust_remote_code
+            use_steplr=use_steplr
         )
     except (MemoryError, OutOfMemoryError) as e:
         logger.error(traceback.format_exc())
