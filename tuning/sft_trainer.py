@@ -274,8 +274,8 @@ def train(
         eval_dataset = _ds["test"]
 
     if num_samples:
-        train_dataset = train_dataset.select(range(num_samples))
-        eval_dataset = eval_dataset.select(range(num_samples))
+        train_dataset = train_dataset.select(range(min(len(train_dataset), num_samples)))
+        eval_dataset = eval_dataset.select(range(min(len(eval_dataset), num_samples)))
 
     if packing_mode == "minibatch":
         data_collator = DataCollatorWithFlattening()
