@@ -277,6 +277,15 @@ def train(
         train_dataset = train_dataset.select(range(min(len(train_dataset), num_samples)))
         eval_dataset = eval_dataset.select(range(min(len(eval_dataset), num_samples)))
 
+    def truncate(examples):
+        return {
+            "input_ids":[x[:max_seq_length] for x in examples["input_ids"]],
+            "labels":[x[:max_seq_length] for x in examples["labels"]],
+        }
+
+    train_dataset = train_dataset.map(truncate, batched=True)
+    eval_dataset = eval_dataset.map(truncate, batched=True)
+
     if packing_mode == "minibatch":
         data_collator = DataCollatorWithFlattening()
     else:
