@@ -322,6 +322,11 @@ def train(
         if k in transformer_train_arg_fields
     }
 
+    if transformer_kwargs["lr_scheduler_type"] == "steplr":
+        transformer_kwargs["lr_scheduler_kwargs"] = {
+            "gamma": 0.33,
+            "step_size": len(train_dataset) // transformer_kwargs["per_device_train_batch_size"]
+        }
     if not use_hf_trainer:
         training_args = SFTConfig(**transformer_kwargs)
         trainer = SFTTrainer(
