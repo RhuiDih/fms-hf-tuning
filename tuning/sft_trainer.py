@@ -286,6 +286,10 @@ def train(
     train_dataset = train_dataset.map(truncate, batched=True)
     eval_dataset = eval_dataset.map(truncate, batched=True)
 
+    from datasets import concatenate_datasets
+    train_dataset = concatenate_datasets([
+        train_dataset, train_dataset, train_dataset, train_dataset, train_dataset
+    ])
     if packing_mode == "minibatch":
         data_collator = DataCollatorWithFlattening()
     else:
