@@ -87,7 +87,8 @@ def train(
     packing_mode:str = None,
     use_hf_trainer:bool = False,
     num_samples:int = 0,
-    goldfish_prob:float =0.,
+    goldfish_prob:float = 0.,
+    attention_dropout:float = 0.,
 ):
     """Call the SFTTrainer
 
@@ -192,6 +193,7 @@ def train(
         cache_dir=train_args.cache_dir,
         torch_dtype=get_torch_dtype(model_args.torch_dtype),
         attn_implementation="flash_attention_2" if model_args.use_flash_attn else None,
+        attention_dropout=attention_dropout
     )
 
     # TODO: Move these to a config as well
@@ -452,8 +454,15 @@ def get_parser():
         default=None,
         choices=["minibatch"],
     )
+
     parser.add_argument(
         "--goldfish_prob",
+        type=float,
+        default=0.,
+    )
+
+    parser.add_argument(
+        "--attention_dropout",
         type=float,
         default=0.,
     )
@@ -541,6 +550,7 @@ def parse_arguments(parser, json_config=None):
         use_hf_trainer = additional.use_hf_trainer
         num_samples = additional.num_samples
         goldfish_prob = additional.goldfish_prob
+        attention_dropout = additional.attention_dropout
 
     if peft_method == "lora":
         tune_config = lora_config
@@ -563,7 +573,8 @@ def parse_arguments(parser, json_config=None):
         packing_mode,
         use_hf_trainer,
         num_samples,
-        goldfish_prob
+        goldfish_prob,
+        attention_dropout
     )
 
 
@@ -589,7 +600,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             packing_mode,
             use_hf_trainer,
             num_samples,
-            goldfish_prob
+            goldfish_prob,
+            attention_dropout
         ) = parse_arguments(parser, job_config)
         logger.debug(
             "Input args parsed: \
@@ -652,7 +664,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             packing_mode=packing_mode,
             use_hf_trainer=use_hf_trainer,
             num_samples=num_samples,
-            goldfish_prob=goldfish_prob
+            goldfish_prob=goldfish_prob,
+            attention_dropout=attention_dropout
         )
     except (MemoryError, OutOfMemoryError) as e:
         logger.error(traceback.format_exc())
