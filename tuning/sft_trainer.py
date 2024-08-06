@@ -87,6 +87,7 @@ def train(
     packing_mode:str = None,
     use_hf_trainer:bool = False,
     num_samples:int = 0,
+    goldfish_prob:float =0.,
 ):
     """Call the SFTTrainer
 
@@ -309,7 +310,7 @@ def train(
 
     if packing_mode == "minibatch":
         from transformers import DataCollatorWithFlattening
-        data_collator = DataCollatorWithFlattening()
+        data_collator = DataCollatorWithFlattening(goldfish_prob=goldfish_prob)
     else:
         data_collator = DataCollatorForSeq2Seq(
             tokenizer=tokenizer, padding=True, max_length=max_seq_length
@@ -451,6 +452,11 @@ def get_parser():
         default=None,
         choices=["minibatch"],
     )
+    parser.add_argument(
+        "--goldfish_prob",
+        type=float,
+        default=0.,
+    )
 
     parser.add_argument(
         "--use_hf_trainer",
@@ -534,6 +540,7 @@ def parse_arguments(parser, json_config=None):
         packing_mode = additional.packing_mode
         use_hf_trainer = additional.use_hf_trainer
         num_samples = additional.num_samples
+        goldfish_prob = additional.goldfish_prob
 
     if peft_method == "lora":
         tune_config = lora_config
@@ -555,7 +562,8 @@ def parse_arguments(parser, json_config=None):
         exp_metadata,
         packing_mode,
         use_hf_trainer,
-        num_samples
+        num_samples,
+        goldfish_prob
     )
 
 
@@ -580,7 +588,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             exp_metadata,
             packing_mode,
             use_hf_trainer,
-            num_samples
+            num_samples,
+            goldfish_prob
         ) = parse_arguments(parser, job_config)
         logger.debug(
             "Input args parsed: \
@@ -643,6 +652,7 @@ def main(**kwargs):  # pylint: disable=unused-argument
             packing_mode=packing_mode,
             use_hf_trainer=use_hf_trainer,
             num_samples=num_samples,
+            goldfish_prob=goldfish_prob
         )
     except (MemoryError, OutOfMemoryError) as e:
         logger.error(traceback.format_exc())
