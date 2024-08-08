@@ -389,6 +389,7 @@ def train(
 
     trainer._move_model_to_device(trainer.model, trainer.args.device)
     eval_result = trainer.evaluate(eval_dataset)
+    print(eval_result)
     import os
     with open(os.path.join(training_args.output_dir, "val_loss.json"), "w") as f:
         json.dump(eval_result, f)
