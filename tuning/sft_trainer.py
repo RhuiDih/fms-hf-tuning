@@ -284,26 +284,43 @@ def train(
         formatting_func = lambda x:x,
         dataset_kwargs = {"skip_prepare_dataset": True},
     )
-    if data_args.training_data_path.endswith("json") or data_args.training_data_path.endswith("jsonl"):
-        dataset = datasets.load_dataset("json", data_files=data_args.training_data_path)
-    else:
-        dataset = datasets.load_from_disk(data_args.training_data_path)
-    train_dataset = dataset["train"]
 
-    if data_args.validation_data_path:
-        eval_dataset = datasets.load_dataset(
-            "json", data_files=data_args.validation_data_path
-        )['train']
-    elif "validation" in dataset:
-        eval_dataset = dataset["validation"]
-    else:
-        _ds = train_dataset.train_test_split(test_size=0.1, seed=train_args.seed)
-        train_dataset = _ds["train"]
-        eval_dataset = _ds["test"]
+    def read_data(path):
 
-    if num_samples:
-        train_dataset = train_dataset.select(range(min(len(train_dataset), num_samples)))
-        eval_dataset = eval_dataset.select(range(min(len(eval_dataset), num_samples)))
+        if data_args.training_data_path.endswith("json") or data_args.training_data_path.endswith("jsonl"):
+            dataset = datasets.load_dataset("json", data_files=data_args.training_data_path)
+        else:
+            dataset = datasets.load_from_disk(data_args.training_data_path)
+        train_dataset = dataset["train"]
+
+        if data_args.validation_data_path:
+            eval_dataset = datasets.load_dataset(
+                "json", data_files=data_args.validation_data_path
+            )['train']
+        elif "validation" in dataset:
+            eval_dataset = dataset["validation"]
+        else:
+            _ds = train_dataset.train_test_split(test_size=0.1, seed=train_args.seed)
+            train_dataset = _ds["train"]
+            eval_dataset = _ds["test"]
+
+        if num_samples:
+            train_dataset = train_dataset.select(range(min(len(train_dataset), num_samples)))
+            eval_dataset = eval_dataset.select(range(min(len(eval_dataset), num_samples)))
+        
+        return train_dataset, eval_dataset
+    
+    if not "," in data_args.training_data_path:
+        train_dataset, eval_dataset = read_data(data_args.training_data_path)
+    else:
+        data_paths = data_args.training_data_path.split(",")
+        train_dataset_list, eval_dataset_list = [], []
+        for dp in data_paths:
+            train_dataset, eval_dataset = read_data(dp)
+            train_dataset_list.append(train_dataset)
+            eval_dataset_list.append(eval_dataset)
+        train_dataset = datasets.concatenate_datasets(train_dataset_list)
+        eval_dataset = datasets.concatenate_datasets(eval_dataset_list)
 
     def truncate(examples):
         return {
