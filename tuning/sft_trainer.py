@@ -287,10 +287,10 @@ def train(
 
     def read_data(path):
 
-        if data_args.training_data_path.endswith("json") or data_args.training_data_path.endswith("jsonl"):
-            dataset = datasets.load_dataset("json", data_files=data_args.training_data_path)
+        if path.endswith("json") or path.endswith("jsonl"):
+            dataset = datasets.load_dataset("json", data_files=path)
         else:
-            dataset = datasets.load_from_disk(data_args.training_data_path)
+            dataset = datasets.load_from_disk(path)
         train_dataset = dataset["train"]
 
         if data_args.validation_data_path:
