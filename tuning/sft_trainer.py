@@ -92,6 +92,7 @@ def train(
     attention_dropout:float = 0.,
     dont_freeze:list = [],
     trust_remote_code:bool = False,
+    pemoet_path:str = ""
 ):
     """Call the SFTTrainer
 
@@ -199,6 +200,13 @@ def train(
         attention_dropout=attention_dropout,
         trust_remote_code=trust_remote_code
     )
+
+    if pemoet_path:
+        import pemoet
+        from peft import PeftModel
+        model = PeftModel.from_pretrained(
+            model, pemoet_path,
+        )
 
     # TODO: Move these to a config as well
     tokenizer = AutoTokenizer.from_pretrained(
@@ -526,6 +534,11 @@ def get_parser():
         default=[]
     )
 
+    parser.add_argument(
+        "--pemoet_path",
+        type=str,
+        default="",
+    )
     return parser
 
 
@@ -600,6 +613,7 @@ def parse_arguments(parser, json_config=None):
         attention_dropout = additional.attention_dropout
         dont_freeze = additional.dont_freeze
         trust_remote_code = additional.trust_remote_code
+        pemoet_path = additional.pemoet_path
 
     if peft_method == "lora":
         tune_config = lora_config
@@ -625,7 +639,8 @@ def parse_arguments(parser, json_config=None):
         goldfish_prob,
         attention_dropout,
         dont_freeze,
-        trust_remote_code
+        trust_remote_code,
+        pemoet_path
     )
 
 
@@ -654,7 +669,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             goldfish_prob,
             attention_dropout,
             dont_freeze,
-            trust_remote_code
+            trust_remote_code,
+            pemoet_path
         ) = parse_arguments(parser, job_config)
         logger.debug(
             "Input args parsed: \
@@ -722,7 +738,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             goldfish_prob=goldfish_prob,
             attention_dropout=attention_dropout,
             dont_freeze=dont_freeze,
-            trust_remote_code=trust_remote_code
+            trust_remote_code=trust_remote_code,
+            pemoet_path=pemoet_path
         )
     except (MemoryError, OutOfMemoryError) as e:
         logger.error(traceback.format_exc())
