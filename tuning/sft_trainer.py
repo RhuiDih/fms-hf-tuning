@@ -92,7 +92,8 @@ def train(
     attention_dropout:float = 0.,
     dont_freeze:list = [],
     trust_remote_code:bool = False,
-    pemoet_path:str = ""
+    pemoet_path:str = "",
+    is_calm:bool=False,
 ):
     """Call the SFTTrainer
 
@@ -192,14 +193,20 @@ def train(
     if framework is not None and framework.requires_custom_loading:
         model_loader = framework.model_loader  # drop-in new loader
     model_load_time = time.time()
-    model = model_loader(
-        model_args.model_name_or_path,
-        cache_dir=train_args.cache_dir,
-        torch_dtype=get_torch_dtype(model_args.torch_dtype),
-        attn_implementation="flash_attention_2" if model_args.use_flash_attn else None,
-        attention_dropout=attention_dropout,
-        trust_remote_code=trust_remote_code
-    )
+
+    if not is_calm:
+        model = model_loader(
+            model_args.model_name_or_path,
+            cache_dir=train_args.cache_dir,
+            torch_dtype=get_torch_dtype(model_args.torch_dtype),
+            attn_implementation="flash_attention_2" if model_args.use_flash_attn else None,
+            attention_dropout=attention_dropout,
+            trust_remote_code=trust_remote_code
+        )
+    else:
+        from model import calm
+        config = calm.CALMConfig.from_pretrained(args.model_path)
+        model = calm.CALM.from_pretrained(args.model_path, torch_dtype=dtype, config=config)
 
     if pemoet_path:
         import pemoet
@@ -539,6 +546,13 @@ def get_parser():
         type=str,
         default="",
     )
+
+    parser.add_argument(
+        "--is_calm",
+        default=False,
+        action="store_true",
+    )
+
     return parser
 
 
@@ -614,6 +628,7 @@ def parse_arguments(parser, json_config=None):
         dont_freeze = additional.dont_freeze
         trust_remote_code = additional.trust_remote_code
         pemoet_path = additional.pemoet_path
+        is_calm = additional.is_calm
 
     if peft_method == "lora":
         tune_config = lora_config
@@ -640,7 +655,8 @@ def parse_arguments(parser, json_config=None):
         attention_dropout,
         dont_freeze,
         trust_remote_code,
-        pemoet_path
+        pemoet_path,
+        is_calm
     )
 
 
@@ -670,7 +686,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             attention_dropout,
             dont_freeze,
             trust_remote_code,
-            pemoet_path
+            pemoet_path,
+            is_calm
         ) = parse_arguments(parser, job_config)
         logger.debug(
             "Input args parsed: \
@@ -739,7 +756,8 @@ def main(**kwargs):  # pylint: disable=unused-argument
             attention_dropout=attention_dropout,
             dont_freeze=dont_freeze,
             trust_remote_code=trust_remote_code,
-            pemoet_path=pemoet_path
+            pemoet_path=pemoet_path,
+            is_calm=is_calm
         )
     except (MemoryError, OutOfMemoryError) as e:
         logger.error(traceback.format_exc())
