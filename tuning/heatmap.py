@@ -486,7 +486,6 @@ def train(
         top2 = np.stack(top2)
         np.save(os.path.join(train_args.output_dir, "top1.npy"), top1)
         np.save(os.path.join(train_args.output_dir, "top2.npy"), top2)
-    trainer.train()
 
 
 def get_parser():
