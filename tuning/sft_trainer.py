@@ -92,7 +92,7 @@ def train(
     attention_dropout:float = 0.,
     dont_freeze:list = [],
     trust_remote_code:bool = False,
-    pemoet_path:str = "",
+    moetify_path:str = "",
     is_calm:bool=False,
 ):
     """Call the SFTTrainer
@@ -208,11 +208,11 @@ def train(
         config = calm.CALMConfig.from_pretrained(args.model_path)
         model = calm.CALM.from_pretrained(args.model_path, torch_dtype=dtype, config=config)
 
-    if pemoet_path:
-        import pemoet
+    if moetify_path:
+        import moetify
         from peft import PeftModel
         model = PeftModel.from_pretrained(
-            model, pemoet_path,
+            model, moetify_path,
         )
 
     # TODO: Move these to a config as well
@@ -542,7 +542,7 @@ def get_parser():
     )
 
     parser.add_argument(
-        "--pemoet_path",
+        "--moetify_path",
         type=str,
         default="",
     )
@@ -627,7 +627,7 @@ def parse_arguments(parser, json_config=None):
         attention_dropout = additional.attention_dropout
         dont_freeze = additional.dont_freeze
         trust_remote_code = additional.trust_remote_code
-        pemoet_path = additional.pemoet_path
+        moetify_path = additional.moetify_path
         is_calm = additional.is_calm
 
     if peft_method == "lora":
@@ -655,7 +655,7 @@ def parse_arguments(parser, json_config=None):
         attention_dropout,
         dont_freeze,
         trust_remote_code,
-        pemoet_path,
+        moetify_path,
         is_calm
     )
 
@@ -686,7 +686,7 @@ def main(**kwargs):  # pylint: disable=unused-argument
             attention_dropout,
             dont_freeze,
             trust_remote_code,
-            pemoet_path,
+            moetify_path,
             is_calm
         ) = parse_arguments(parser, job_config)
         logger.debug(
@@ -756,7 +756,7 @@ def main(**kwargs):  # pylint: disable=unused-argument
             attention_dropout=attention_dropout,
             dont_freeze=dont_freeze,
             trust_remote_code=trust_remote_code,
-            pemoet_path=pemoet_path,
+            moetify_path=moetify_path,
             is_calm=is_calm
         )
     except (MemoryError, OutOfMemoryError) as e:
